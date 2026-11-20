@@ -1,4 +1,5 @@
-name: Gemini Facebook AI Agent
+
+name: Khela.top AI Sports Marketing Agent
 
 on:
   workflow_dispatch:
@@ -9,67 +10,202 @@ permissions:
   contents: read
 
 jobs:
-  generate-post:
+  generate-and-publish:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Generate Bengali Post with Gemini
+      - name: Generate and Publish Khela.top Post
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
+          FACEBOOK_PAGE_ACCESS_TOKEN: ${{ secrets.FACEBOOK_PAGE_ACCESS_TOKEN }}
         run: |
           python - <<'PY'
           import os
           import json
           import urllib.request
+          import urllib.parse
+          import urllib.error
+          from html.parser import HTMLParser
 
+          # Check required secrets
           api_key = os.environ["GEMINI_API_KEY"]
+          page_id = os.environ["FACEBOOK_PAGE_ID"]
+          page_token = os.environ["FACEBOOK_PAGE_ACCESS_TOKEN"]
 
-          url = (
-              "https://generativelanguage.googleapis.com/v1beta/"
-              "models/gemini-3.1-flash-lite:generateContent"
-              "?key=" + api_key
-          )
+          # Read public information from Khela.top
+          class WebsiteText(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.parts = []
+                  self.skip = 0
 
-          prompt = """
-          তুমি একজন অভিজ্ঞ বাংলা Facebook Content Creator।
+              def handle_starttag(self, tag, attrs):
+                  if tag in ("script", "style", "noscript", "svg"):
+                      self.skip += 1
 
-          আজকের জন্য একটি সম্পূর্ণ নতুন, আকর্ষণীয়,
-          তথ্যবহুল বাংলা Facebook পোস্ট তৈরি করো।
+              def handle_endtag(self, tag):
+                  if tag in ("script", "style", "noscript", "svg"):
+                      self.skip = max(0, self.skip - 1)
 
-          প্রতিবার নতুন বিষয় নির্বাচন করবে।
-          সহজ ও সুন্দর বাংলা ব্যবহার করবে।
-          পাঠকের আগ্রহ ধরে রাখবে।
-          শেষে ৩-৫টি প্রাসঙ্গিক Hashtag দেবে।
+              def handle_data(self, data):
+                  if not self.skip:
+                      text = data.strip()
+                      if text:
+                          self.parts.append(text)
 
-          শুধু পোস্টের লেখা দেবে।
+          website_info = ""
+
+          try:
+              req = urllib.request.Request(
+                  "https://khela.top",
+                  headers={"User-Agent": "KhelaTopMarketingAgent/1.0"}
+              )
+
+              with urllib.request.urlopen(req, timeout=25) as response:
+                  html = response.read().decode("utf-8", errors="replace")
+
+              parser = WebsiteText()
+              parser.feed(html)
+              website_info = " ".join(parser.parts)[:10000]
+
+              print("Khela.top website information retrieved.")
+
+          except Exception as error:
+              print("Website reading warning:", str(error))
+              print("Using verified brand information only.")
+
+          # Generate Bengali sports marketing content
+          prompt = f"""
+          তুমি Khela.top নামের একটি Sports Platform-এর
+          Professional Bengali Social Media Marketing Manager।
+
+          Official website: https://khela.top
+          Facebook Page: Khela.top
+
+          BRAND INFORMATION:
+          Khela.top একটি খেলাধুলাভিত্তিক প্ল্যাটফর্ম।
+          এর মূল বিষয় ক্রিকেট, ফুটবল, ব্যাডমিন্টন,
+          খেলোয়াড়, দল, ম্যাচ এবং টুর্নামেন্ট।
+
+          WEBSITE INFORMATION:
+          {website_info}
+
+          তোমার দায়িত্ব:
+
+          1. খেলাধুলা নিয়ে আকর্ষণীয় বাংলা পোস্ট তৈরি করবে।
+          2. Khela.top ওয়েবসাইটের পরিচিতি বাড়াবে।
+          3. খেলোয়াড় ও দলকে প্ল্যাটফর্মটি ব্যবহার করতে উৎসাহিত করবে।
+          4. টুর্নামেন্ট, ম্যাচ ও স্কোরিং সুবিধার প্রচার করবে,
+             তবে শুধু ওয়েবসাইটে থাকা বা নিশ্চিত তথ্য ব্যবহার করবে।
+          5. ক্রিকেট, ফুটবল ও ব্যাডমিন্টনের মধ্যে বিষয় পরিবর্তন করবে।
+          6. কখনো একই ধরনের পোস্ট বারবার তৈরি করবে না।
+          7. ভুয়া খবর, বানানো পরিসংখ্যান বা অস্তিত্বহীন
+             ফিচারের কথা বলবে না।
+          8. সুন্দর, স্বাভাবিক, আকর্ষণীয় বাংলা ব্যবহার করবে।
+          9. পোস্টের শেষে 3-5টি প্রাসঙ্গিক Hashtag দেবে।
+          10. পোস্টে স্বাভাবিকভাবে https://khela.top
+              ওয়েবসাইটটি ভিজিট করার আহ্বান জানাবে।
+
+          পোস্টটি যেন বিজ্ঞাপনের মতো অতিরিক্ত বিরক্তিকর না হয়।
+          খেলাধুলার তথ্য ও Khela.top-এর প্রচারের মধ্যে
+          সুন্দর ভারসাম্য রাখবে।
+
+          শুধু Facebook পোস্টের লেখা দেবে।
           """
 
-          data = {
+          gemini_url = (
+              "https://generativelanguage.googleapis.com/v1beta/"
+              "models/gemini-3.1-flash-lite:generateContent"
+              "?key=" + urllib.parse.quote(api_key)
+          )
+
+          gemini_data = {
               "contents": [{
                   "parts": [{"text": prompt}]
               }]
           }
 
-          request = urllib.request.Request(
-              url,
-              data=json.dumps(data).encode("utf-8"),
+          gemini_request = urllib.request.Request(
+              gemini_url,
+              data=json.dumps(gemini_data).encode("utf-8"),
               headers={"Content-Type": "application/json"},
               method="POST"
           )
 
           try:
-              with urllib.request.urlopen(request, timeout=60) as response:
+              with urllib.request.urlopen(
+                  gemini_request, timeout=60
+              ) as response:
                   result = json.loads(response.read())
 
-              post = result["candidates"][0]["content"]["parts"][0]["text"]
+              post = (
+                  result["candidates"][0]["content"]["parts"][0]["text"]
+                  .strip()
+              )
 
-              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
-                  f.write("# Gemini AI Generated Facebook Post\n\n")
-                  f.write(post)
+              if not post:
+                  raise ValueError("Gemini returned an empty post.")
 
-              print("Gemini AI successfully generated a post.")
+              print("Gemini successfully generated the post.")
+
+              # Publish to Khela.top Facebook Page
+              graph_url = (
+                  "https://graph.facebook.com/v27.0/"
+                  + urllib.parse.quote(page_id, safe="")
+                  + "/feed"
+              )
+
+              publish_data = urllib.parse.urlencode({
+                  "message": post,
+                  "link": "https://khela.top",
+                  "access_token": page_token
+              }).encode("utf-8")
+
+              publish_request = urllib.request.Request(
+                  graph_url,
+                  data=publish_data,
+                  headers={
+                      "Content-Type": "application/x-www-form-urlencoded"
+                  },
+                  method="POST"
+              )
+
+              with urllib.request.urlopen(
+                  publish_request, timeout=60
+              ) as response:
+                  publish_result = json.loads(response.read())
+
+              post_id = publish_result.get("id")
+
+              if not post_id:
+                  raise ValueError(
+                      "Facebook did not return a published post ID."
+                  )
+
+              print("SUCCESS: Khela.top Facebook post published!")
+              print("Facebook Post ID:", post_id)
+
+              with open(
+                  os.environ["GITHUB_STEP_SUMMARY"],
+                  "a",
+                  encoding="utf-8"
+              ) as f:
+                  f.write("# Khela.top AI Marketing Agent\n\n")
+                  f.write("**Status:** Successfully published\n\n")
+                  f.write("**Website:** https://khela.top\n\n")
+                  f.write("**Facebook Post ID:** " + post_id + "\n\n")
+                  f.write("## Published Post\n\n")
+                  f.write(post + "\n")
+
+          except urllib.error.HTTPError as error:
+              details = error.read().decode("utf-8", errors="replace")
+              print("API HTTP Error:", error.code)
+              print("Error details:", details)
+              raise
 
           except Exception as error:
-              print("Gemini API request failed:", str(error))
+              print("Agent failed:", str(error))
               raise
+
           PY
