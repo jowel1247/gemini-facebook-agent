@@ -4,7 +4,10 @@ name: Khela.top AI Sports Marketing Agent
 on:
   workflow_dispatch:
   schedule:
+    # Bangladesh time: 9:00 AM
     - cron: "0 3 * * *"
+    # Bangladesh time: 7:30 PM
+    - cron: "30 13 * * *"
 
 permissions:
   contents: read
@@ -14,7 +17,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Generate and Publish Khela.top Post
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Image Library
+        run: pip install --disable-pip-version-check Pillow
+
+      - name: Generate and Publish Khela.top Content
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
@@ -26,94 +37,121 @@ jobs:
           import urllib.request
           import urllib.parse
           import urllib.error
-          from html.parser import HTMLParser
+          import io
+          import re
+          from datetime import datetime, timezone, timedelta
+          from PIL import Image, ImageDraw, ImageFont
 
-          # Check required secrets
           api_key = os.environ["GEMINI_API_KEY"]
           page_id = os.environ["FACEBOOK_PAGE_ID"]
           page_token = os.environ["FACEBOOK_PAGE_ACCESS_TOKEN"]
 
-          # Read public information from Khela.top
-          class WebsiteText(HTMLParser):
-              def __init__(self):
-                  super().__init__()
-                  self.parts = []
-                  self.skip = 0
+          WEBSITE = "https://khela.top"
+          GRAPH_API = "https://graph.facebook.com/v27.0/"
 
-              def handle_starttag(self, tag, attrs):
-                  if tag in ("script", "style", "noscript", "svg"):
-                      self.skip += 1
+          # Bangladesh local time
+          now = datetime.now(timezone.utc) + timedelta(hours=6)
+          slot = "morning" if now.hour < 15 else "evening"
 
-              def handle_endtag(self, tag):
-                  if tag in ("script", "style", "noscript", "svg"):
-                      self.skip = max(0, self.skip - 1)
-
-              def handle_data(self, data):
-                  if not self.skip:
-                      text = data.strip()
-                      if text:
-                          self.parts.append(text)
-
+          # Retrieve public website information
           website_info = ""
 
           try:
               req = urllib.request.Request(
-                  "https://khela.top",
+                  WEBSITE,
                   headers={"User-Agent": "KhelaTopMarketingAgent/1.0"}
               )
 
               with urllib.request.urlopen(req, timeout=25) as response:
                   html = response.read().decode("utf-8", errors="replace")
 
-              parser = WebsiteText()
+              from html.parser import HTMLParser
+
+              class TextParser(HTMLParser):
+                  def __init__(self):
+                      super().__init__()
+                      self.parts = []
+                      self.skip = 0
+
+                  def handle_starttag(self, tag, attrs):
+                      if tag in ("script", "style", "noscript", "svg"):
+                          self.skip += 1
+
+                  def handle_endtag(self, tag):
+                      if tag in ("script", "style", "noscript", "svg"):
+                          self.skip = max(0, self.skip - 1)
+
+                  def handle_data(self, data):
+                      if not self.skip and data.strip():
+                          self.parts.append(data.strip())
+
+              parser = TextParser()
               parser.feed(html)
               website_info = " ".join(parser.parts)[:10000]
 
-              print("Khela.top website information retrieved.")
+              print("Khela.top website retrieved successfully.")
 
           except Exception as error:
-              print("Website reading warning:", str(error))
-              print("Using verified brand information only.")
+              print("Website retrieval warning:", str(error))
 
-          # Generate Bengali sports marketing content
+          # Gemini content instructions
           prompt = f"""
-          তুমি Khela.top নামের একটি Sports Platform-এর
-          Professional Bengali Social Media Marketing Manager।
+          তুমি Khela.top-এর Professional Bengali Sports Content Manager।
 
           Official website: https://khela.top
           Facebook Page: Khela.top
 
-          BRAND INFORMATION:
-          Khela.top একটি খেলাধুলাভিত্তিক প্ল্যাটফর্ম।
-          এর মূল বিষয় ক্রিকেট, ফুটবল, ব্যাডমিন্টন,
-          খেলোয়াড়, দল, ম্যাচ এবং টুর্নামেন্ট।
+          তোমার মূল লক্ষ্য:
+          Khela.top-এর পরিচিতি বাড়ানো এবং খেলাধুলার
+          আগ্রহী মানুষকে ওয়েবসাইটে আসতে উৎসাহিত করা।
 
-          WEBSITE INFORMATION:
+          Website information:
           {website_info}
 
-          তোমার দায়িত্ব:
+          আজকের বাংলাদেশ সময়: {now.strftime("%Y-%m-%d %H:%M")}
+          Posting slot: {slot}
 
-          1. খেলাধুলা নিয়ে আকর্ষণীয় বাংলা পোস্ট তৈরি করবে।
-          2. Khela.top ওয়েবসাইটের পরিচিতি বাড়াবে।
-          3. খেলোয়াড় ও দলকে প্ল্যাটফর্মটি ব্যবহার করতে উৎসাহিত করবে।
-          4. টুর্নামেন্ট, ম্যাচ ও স্কোরিং সুবিধার প্রচার করবে,
-             তবে শুধু ওয়েবসাইটে থাকা বা নিশ্চিত তথ্য ব্যবহার করবে।
-          5. ক্রিকেট, ফুটবল ও ব্যাডমিন্টনের মধ্যে বিষয় পরিবর্তন করবে।
-          6. কখনো একই ধরনের পোস্ট বারবার তৈরি করবে না।
-          7. ভুয়া খবর, বানানো পরিসংখ্যান বা অস্তিত্বহীন
-             ফিচারের কথা বলবে না।
-          8. সুন্দর, স্বাভাবিক, আকর্ষণীয় বাংলা ব্যবহার করবে।
-          9. পোস্টের শেষে 3-5টি প্রাসঙ্গিক Hashtag দেবে।
-          10. পোস্টে স্বাভাবিকভাবে https://khela.top
-              ওয়েবসাইটটি ভিজিট করার আহ্বান জানাবে।
+          Content topics:
+          - Cricket
+          - Football
+          - Badminton
+          - Local sports
+          - Players and teams
+          - Tournaments and matches
+          - Khela.top website promotion
 
-          পোস্টটি যেন বিজ্ঞাপনের মতো অতিরিক্ত বিরক্তিকর না হয়।
-          খেলাধুলার তথ্য ও Khela.top-এর প্রচারের মধ্যে
-          সুন্দর ভারসাম্য রাখবে।
+          Content rules:
+          1. স্বাভাবিক ও মানুষের মতো সাবলীল বাংলা লিখবে।
+          2. প্রতিবার নতুন বিষয় ও নতুন লেখার ধরন বেছে নেবে।
+          3. অপ্রমাণিত খবর, স্কোর বা পরিসংখ্যান বানাবে না।
+          4. ওয়েবসাইটে নেই এমন ফিচার দাবি করবে না।
+          5. অযথা বিজ্ঞাপনের ভাষা ব্যবহার করবে না।
+          6. পাঠকের আগ্রহ তৈরি করে এমন বিষয় বেছে নেবে।
+          7. প্রাসঙ্গিক ৩-৫টি Hashtag ব্যবহার করবে।
+          8. Khela.top-এর ওয়েবসাইটের কথা স্বাভাবিকভাবে উল্লেখ করবে।
+          9. Engagement বাড়ানোর জন্য স্বাভাবিক প্রশ্ন করা যাবে।
+          10. ভুয়া ব্যক্তিগত অভিজ্ঞতা বা পরিচয় তৈরি করবে না।
 
-          শুধু Facebook পোস্টের লেখা দেবে।
+          IMAGE DECISION:
+          তোমাকে নিজেই সিদ্ধান্ত নিতে হবে পোস্টটি ছবি দিয়ে
+          প্রকাশ করা ভালো, নাকি শুধু লেখা দিয়ে।
+
+          - ছবি উপযোগী হলে post_type হবে "image"।
+          - সাধারণ আলোচনা বা তথ্যভিত্তিক লেখা উপযোগী হলে
+            post_type হবে "text"।
+          - একই ফরম্যাট সবসময় নির্বাচন করবে না।
+          - ছবি নির্বাচন করলে sport হিসেবে Cricket,
+            Football, Badminton অথবা General দেবে।
+
+          Return ONLY valid JSON:
+          {{
+            "post_type": "image or text",
+            "sport": "Cricket, Football, Badminton or General",
+            "caption": "Complete Bengali Facebook post"
+          }}
           """
 
+          # Generate content
           gemini_url = (
               "https://generativelanguage.googleapis.com/v1beta/"
               "models/gemini-3.1-flash-lite:generateContent"
@@ -123,10 +161,14 @@ jobs:
           gemini_data = {
               "contents": [{
                   "parts": [{"text": prompt}]
-              }]
+              }],
+              "generationConfig": {
+                  "responseMimeType": "application/json",
+                  "temperature": 0.9
+              }
           }
 
-          gemini_request = urllib.request.Request(
+          request = urllib.request.Request(
               gemini_url,
               data=json.dumps(gemini_data).encode("utf-8"),
               headers={"Content-Type": "application/json"},
@@ -134,57 +176,300 @@ jobs:
           )
 
           try:
-              with urllib.request.urlopen(
-                  gemini_request, timeout=60
-              ) as response:
+              with urllib.request.urlopen(request, timeout=90) as response:
                   result = json.loads(response.read())
 
-              post = (
-                  result["candidates"][0]["content"]["parts"][0]["text"]
-                  .strip()
-              )
+              raw = result["candidates"][0]["content"]["parts"][0]["text"]
+              raw = raw.strip()
 
-              if not post:
-                  raise ValueError("Gemini returned an empty post.")
+              if raw.startswith("```"):
+                  raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                  raw = re.sub(r"\s*```$", "", raw)
 
-              print("Gemini successfully generated the post.")
+              content = json.loads(raw)
 
-              # Publish to Khela.top Facebook Page
-              graph_url = (
-                  "https://graph.facebook.com/v27.0/"
-                  + urllib.parse.quote(page_id, safe="")
-                  + "/feed"
-              )
+              post_type = content.get("post_type", "text").lower()
+              sport = content.get("sport", "General").title()
+              caption = content.get("caption", "").strip()
 
-              publish_data = urllib.parse.urlencode({
-                  "message": post,
-                  "link": "https://khela.top",
-                  "access_token": page_token
-              }).encode("utf-8")
+              if post_type not in ("image", "text"):
+                  post_type = "text"
 
-              publish_request = urllib.request.Request(
-                  graph_url,
-                  data=publish_data,
-                  headers={
-                      "Content-Type": "application/x-www-form-urlencoded"
-                  },
-                  method="POST"
-              )
+              if sport not in ("Cricket", "Football", "Badminton", "General"):
+                  sport = "General"
+
+              if not caption:
+                  raise ValueError("Gemini returned an empty caption.")
+
+              if WEBSITE not in caption:
+                  caption += "\n\nআরও জানতে ভিজিট করুন: " + WEBSITE
+
+              print("Gemini content generated successfully.")
+              print("Selected post type:", post_type)
+              print("Selected sport:", sport)
+
+              # Create an original branded sports graphic
+              def create_graphic(category):
+                  width, height = 1200, 630
+                  img = Image.new("RGB", (width, height), "#10182c")
+                  draw = ImageDraw.Draw(img)
+
+                  # Background gradient
+                  for y in range(height):
+                      ratio = y / height
+                      r = int(16 + 10 * ratio)
+                      g = int(24 + 12 * ratio)
+                      b = int(44 + 30 * ratio)
+                      draw.line((0, y, width, y), fill=(r, g, b))
+
+                  # Decorative shapes
+                  draw.ellipse(
+                      (790, -180, 1320, 350),
+                      fill="#183f63"
+                  )
+                  draw.ellipse(
+                      (870, 330, 1330, 790),
+                      fill="#174b52"
+                  )
+                  draw.rounded_rectangle(
+                      (55, 55, 1145, 575),
+                      radius=35,
+                      outline="#397b91",
+                      width=3
+                  )
+
+                  font_path = (
+                      "/usr/share/fonts/truetype/dejavu/"
+                      "DejaVuSans-Bold.ttf"
+                  )
+                  regular_path = (
+                      "/usr/share/fonts/truetype/dejavu/"
+                      "DejaVuSans.ttf"
+                  )
+
+                  brand_font = ImageFont.truetype(font_path, 66)
+                  title_font = ImageFont.truetype(font_path, 37)
+                  small_font = ImageFont.truetype(regular_path, 23)
+
+                  # Brand
+                  draw.text(
+                      (100, 105),
+                      "Khela.top",
+                      font=brand_font,
+                      fill="#ffffff"
+                  )
+
+                  draw.text(
+                      (105, 205),
+                      "SPORTS COMMUNITY",
+                      font=title_font,
+                      fill="#52dfc2"
+                  )
+
+                  labels = {
+                      "Cricket": "CRICKET",
+                      "Football": "FOOTBALL",
+                      "Badminton": "BADMINTON",
+                      "General": "ALL SPORTS"
+                  }
+
+                  draw.text(
+                      (105, 295),
+                      labels[category],
+                      font=title_font,
+                      fill="#ffffff"
+                  )
+
+                  draw.text(
+                      (105, 390),
+                      "PLAY  |  CONNECT  |  COMPETE",
+                      font=small_font,
+                      fill="#c5d7e8"
+                  )
+
+                  # Category-specific sports illustration
+                  cx, cy = 910, 300
+
+                  if category == "Cricket":
+                      draw.ellipse(
+                          (cx-100, cy-100, cx+100, cy+100),
+                          fill="#d83e4d",
+                          outline="#ffffff",
+                          width=5
+                      )
+                      draw.line(
+                          (cx-55, cy-70, cx+55, cy+70),
+                          fill="#ffffff",
+                          width=7
+                      )
+                      draw.line(
+                          (cx-70, cy-55, cx+70, cy+55),
+                          fill="#ffffff",
+                          width=3
+                      )
+                      draw.rounded_rectangle(
+                          (cx+130, cy-135, cx+165, cy+100),
+                          radius=12,
+                          fill="#d7ad70"
+                      )
+                      for offset in (-35, 0, 35):
+                          draw.line(
+                              (cx+215+offset, cy+30,
+                               cx+215+offset, cy+115),
+                              fill="#ffffff",
+                              width=8
+                          )
+
+                  elif category == "Football":
+                      draw.ellipse(
+                          (cx-125, cy-125, cx+125, cy+125),
+                          fill="#ffffff",
+                          outline="#52dfc2",
+                          width=8
+                      )
+                      draw.polygon(
+                          [(cx,cy-45),(cx+45,cy-15),
+                           (cx+28,cy+40),(cx-28,cy+40),
+                           (cx-45,cy-15)],
+                          fill="#172238"
+                      )
+                      for angle in range(0, 360, 72):
+                          import math
+                          import math as m
+                          px = cx + int(82*m.cos(m.radians(angle)))
+                          py = cy + int(82*m.sin(m.radians(angle)))
+                          draw.ellipse(
+                              (px-20, py-20, px+20, py+20),
+                              fill="#172238"
+                          )
+
+                  elif category == "Badminton":
+                      draw.ellipse(
+                          (cx-75, cy-115, cx+75, cy+35),
+                          outline="#ffffff",
+                          width=13
+                      )
+                      draw.line(
+                          (cx-55, cy-65, cx+55, cy-65),
+                          fill="#ffffff",
+                          width=5
+                      )
+                      draw.line(
+                          (cx, cy-115, cx, cy+35),
+                          fill="#ffffff",
+                          width=5
+                      )
+                      draw.line(
+                          (cx-45, cy+30, cx+90, cy+175),
+                          fill="#52dfc2",
+                          width=22
+                      )
+                      draw.polygon(
+                          [(cx+130,cy-80),(cx+215,cy-80),
+                           (cx+180,cy+65),(cx+145,cy+65)],
+                          fill="#e4e9f2"
+                      )
+
+                  else:
+                      draw.ellipse(
+                          (cx-120, cy-120, cx+120, cy+120),
+                          outline="#52dfc2",
+                          width=15
+                      )
+                      draw.arc(
+                          (cx-85, cy-85, cx+85, cy+85),
+                          30, 300,
+                          fill="#ffffff",
+                          width=10
+                      )
+
+                  return img
+
+              # Publish to Facebook
+              if post_type == "image":
+                  image = create_graphic(sport)
+                  image_buffer = io.BytesIO()
+                  image.save(image_buffer, format="PNG")
+                  image_bytes = image_buffer.getvalue()
+
+                  boundary = "----KhelaTopBoundary2026"
+                  parts = []
+
+                  def add_field(name, value):
+                      parts.append(
+                          f"--{boundary}\r\n"
+                          f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                          f"{value}\r\n".encode("utf-8")
+                      )
+
+                  add_field("caption", caption)
+
+                  parts.append(
+                      (
+                          f"--{boundary}\r\n"
+                          'Content-Disposition: form-data; name="source"; '
+                          'filename="khelatop-sports.png"\r\n'
+                          "Content-Type: image/png\r\n\r\n"
+                      ).encode("utf-8")
+                      + image_bytes + b"\r\n"
+                  )
+
+                  add_field("access_token", page_token)
+                  parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+
+                  body = b"".join(parts)
+
+                  publish_url = (
+                      GRAPH_API + urllib.parse.quote(page_id, safe="") + "/photos"
+                  )
+
+                  publish_request = urllib.request.Request(
+                      publish_url,
+                      data=body,
+                      headers={
+                          "Content-Type": "multipart/form-data; boundary=" + boundary
+                      },
+                      method="POST"
+                  )
+
+              else:
+                  publish_url = (
+                      GRAPH_API + urllib.parse.quote(page_id, safe="") + "/feed"
+                  )
+
+                  body = urllib.parse.urlencode({
+                      "message": caption,
+                      "link": WEBSITE,
+                      "access_token": page_token
+                  }).encode("utf-8")
+
+                  publish_request = urllib.request.Request(
+                      publish_url,
+                      data=body,
+                      headers={
+                          "Content-Type": "application/x-www-form-urlencoded"
+                      },
+                      method="POST"
+                  )
 
               with urllib.request.urlopen(
-                  publish_request, timeout=60
+                  publish_request, timeout=90
               ) as response:
                   publish_result = json.loads(response.read())
 
-              post_id = publish_result.get("id")
+              post_id = (
+                  publish_result.get("id")
+                  or publish_result.get("post_id")
+              )
 
               if not post_id:
                   raise ValueError(
                       "Facebook did not return a published post ID."
                   )
 
-              print("SUCCESS: Khela.top Facebook post published!")
-              print("Facebook Post ID:", post_id)
+              print("SUCCESS: Facebook post published!")
+              print("Post type:", post_type)
+              print("Post ID:", post_id)
 
               with open(
                   os.environ["GITHUB_STEP_SUMMARY"],
@@ -193,10 +478,12 @@ jobs:
               ) as f:
                   f.write("# Khela.top AI Marketing Agent\n\n")
                   f.write("**Status:** Successfully published\n\n")
-                  f.write("**Website:** https://khela.top\n\n")
-                  f.write("**Facebook Post ID:** " + post_id + "\n\n")
-                  f.write("## Published Post\n\n")
-                  f.write(post + "\n")
+                  f.write("**Post type:** " + post_type + "\n\n")
+                  f.write("**Sport:** " + sport + "\n\n")
+                  f.write("**Website:** " + WEBSITE + "\n\n")
+                  f.write("**Post ID:** " + post_id + "\n\n")
+                  f.write("## Published Caption\n\n")
+                  f.write(caption + "\n")
 
           except urllib.error.HTTPError as error:
               details = error.read().decode("utf-8", errors="replace")
