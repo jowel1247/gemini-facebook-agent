@@ -1,4 +1,3 @@
-
 name: Gemini Facebook AI Agent
 
 on:
@@ -6,9 +5,71 @@ on:
   schedule:
     - cron: "0 3 * * *"
 
+permissions:
+  contents: read
+
 jobs:
-  test:
+  generate-post:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Check automation
-        run: echo "Gemini Facebook Agent is ready!"
+      - name: Generate Bengali Post with Gemini
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python - <<'PY'
+          import os
+          import json
+          import urllib.request
+
+          api_key = os.environ["GEMINI_API_KEY"]
+
+          url = (
+              "https://generativelanguage.googleapis.com/v1beta/"
+              "models/gemini-3.1-flash-lite:generateContent"
+              "?key=" + api_key
+          )
+
+          prompt = """
+          তুমি একজন অভিজ্ঞ বাংলা Facebook Content Creator।
+
+          আজকের জন্য একটি সম্পূর্ণ নতুন, আকর্ষণীয়,
+          তথ্যবহুল বাংলা Facebook পোস্ট তৈরি করো।
+
+          প্রতিবার নতুন বিষয় নির্বাচন করবে।
+          সহজ ও সুন্দর বাংলা ব্যবহার করবে।
+          পাঠকের আগ্রহ ধরে রাখবে।
+          শেষে ৩-৫টি প্রাসঙ্গিক Hashtag দেবে।
+
+          শুধু পোস্টের লেখা দেবে।
+          """
+
+          data = {
+              "contents": [{
+                  "parts": [{"text": prompt}]
+              }]
+          }
+
+          request = urllib.request.Request(
+              url,
+              data=json.dumps(data).encode("utf-8"),
+              headers={"Content-Type": "application/json"},
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  result = json.loads(response.read())
+
+              post = result["candidates"][0]["content"]["parts"][0]["text"]
+
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+                  f.write("# Gemini AI Generated Facebook Post\n\n")
+                  f.write(post)
+
+              print("Gemini AI successfully generated a post.")
+
+          except Exception as error:
+              print("Gemini API request failed:", str(error))
+              raise
+          PY
