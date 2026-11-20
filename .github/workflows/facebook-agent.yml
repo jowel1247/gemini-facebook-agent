@@ -1,0 +1,14 @@
+
+name: Gemini Facebook AI Agent
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check automation
+        run: echo "Gemini Facebook Agent is ready!"
