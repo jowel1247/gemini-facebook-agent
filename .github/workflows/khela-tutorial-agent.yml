@@ -3,6 +3,16 @@ name: Khela.top Tutorial AI Agent
 
 on:
   workflow_dispatch:
+    inputs:
+      post_type:
+        description: "কোন ধরনের পোস্ট পরীক্ষা করবেন?"
+        required: true
+        type: choice
+        options:
+          - carousel
+          - written
+        default: carousel
+
   schedule:
     # Bangladesh time: 8:00 AM
     - cron: "0 2 * * *"
@@ -10,7 +20,7 @@ on:
     - cron: "0 12 * * *"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: khelatop-tutorial-agent
@@ -19,18 +29,24 @@ concurrency:
 jobs:
   tutorial-agent:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
-      - name: Install libraries
+      - name: Install libraries and Bengali fonts
         run: |
-          pip install --disable-pip-version-check \
-            playwright pillow requests
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-core
+          pip install --disable-pip-version-check playwright pillow requests
           playwright install --with-deps chromium
 
       - name: Run Khela.top Tutorial Agent
@@ -39,37 +55,73 @@ jobs:
           FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
           FACEBOOK_PAGE_ACCESS_TOKEN: ${{ secrets.FACEBOOK_PAGE_ACCESS_TOKEN }}
           GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           EVENT_SCHEDULE: ${{ github.event.schedule }}
+          MANUAL_POST_TYPE: ${{ inputs.post_type }}
         run: |
           cat > agent.py <<'PY'
-          import os, json, requests, io, re
+          import os
+          import re
+          import io
+          import json
+          import base64
+          import subprocess
+          import requests
           from datetime import datetime, timezone, timedelta
-          from urllib.parse import urljoin, urlparse
-          from playwright.sync_api import sync_playwright
+          from urllib.parse import urljoin, urlparse, urldefrag
+          from collections import deque
           from PIL import Image, ImageDraw, ImageFont
+          from playwright.sync_api import sync_playwright
 
           SITE = "https://khela.top"
           GRAPH = "https://graph.facebook.com/v27.0"
+          GEMINI_MODEL = "gemini-3.1-flash-lite"
+
           API_KEY = os.environ["GEMINI_API_KEY"]
           PAGE_ID = os.environ["FACEBOOK_PAGE_ID"]
           TOKEN = os.environ["FACEBOOK_PAGE_ACCESS_TOKEN"]
 
           now = datetime.now(timezone.utc) + timedelta(hours=6)
           schedule = os.environ.get("EVENT_SCHEDULE", "")
+          manual_type = os.environ.get("MANUAL_POST_TYPE", "")
 
           if schedule == "0 2 * * *":
               mode = "carousel"
           elif schedule == "0 12 * * *":
               mode = "written"
+          elif manual_type in ("carousel", "written"):
+              mode = manual_type
           else:
-              mode = "carousel" if now.hour < 13 else "written"
+              mode = "carousel"
 
           print("Bangladesh time:", now.isoformat())
-          print("Selected mode:", mode)
+          print("Publishing mode:", mode)
 
-          # 1. Browse publicly accessible website pages.
+          # --------------------------------------------------
+          # 1. Read recent post history to avoid repeated topics.
+          # --------------------------------------------------
+
+          HISTORY_FILE = "post_history.json"
+
+          if os.path.exists(HISTORY_FILE):
+              with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                  history = json.load(f)
+          else:
+              history = []
+
+          recent_history = history[-40:]
+
+          # --------------------------------------------------
+          # 2. Browse public pages only.
+          #    No login, form submission, registration,
+          #    record creation or destructive interaction.
+          # --------------------------------------------------
+
           pages = []
-          screenshots = []
+          queue = deque([SITE])
+          visited = set()
+          site_host = urlparse(SITE).netloc
 
           with sync_playwright() as p:
               browser = p.chromium.launch(headless=True)
@@ -78,215 +130,553 @@ jobs:
                   device_scale_factor=1
               )
 
-              page.goto(SITE, wait_until="domcontentloaded",
-                        timeout=60000)
-              page.wait_for_timeout(3000)
+              while queue and len(pages) < 12:
+                  url = queue.popleft()
+                  url = urldefrag(url)[0].rstrip("/")
 
-              links = page.locator("a[href]").evaluate_all(
-                  """els => els.map(a => a.href)"""
-              )
+                  if url in visited:
+                      continue
+                  visited.add(url)
 
-              urls = [SITE]
-              for link in links:
-                  parsed = urlparse(link)
-                  if parsed.netloc == urlparse(SITE).netloc:
-                      clean = link.split("#")[0]
-                      if clean not in urls:
-                          urls.append(clean)
-                  if len(urls) >= 7:
-                      break
+                  parsed = urlparse(url)
+                  if parsed.scheme not in ("http", "https"):
+                      continue
+                  if parsed.netloc != site_host:
+                      continue
 
-              for index, url in enumerate(urls[:6]):
                   try:
-                      page.goto(url, wait_until="domcontentloaded",
-                                timeout=30000)
-                      page.wait_for_timeout(1500)
+                      print("Inspecting:", url)
+                      page.goto(
+                          url,
+                          wait_until="domcontentloaded",
+                          timeout=45000
+                      )
+                      page.wait_for_timeout(1800)
 
-                      title = page.title()
-                      text = page.locator("body").inner_text(
+                      final_url = urldefrag(page.url)[0].rstrip("/")
+                      if urlparse(final_url).netloc != site_host:
+                          continue
+
+                      title = page.title().strip()
+                      body = page.locator("body").inner_text(
                           timeout=10000
-                      )[:5000]
+                      ).strip()
 
-                      filename = f"page_{index}.png"
+                      if len(body) < 100:
+                          continue
+
+                      # Capture links for further public-page inspection.
+                      links = page.locator("a[href]").evaluate_all(
+                          "(els) => els.map(a => a.href)"
+                      )
+
+                      for link in links:
+                          link = urldefrag(link)[0].rstrip("/")
+                          lp = urlparse(link)
+
+                          if (
+                              lp.scheme in ("http", "https")
+                              and lp.netloc == site_host
+                              and link not in visited
+                              and link not in queue
+                          ):
+                              queue.append(link)
+
+                      # One real viewport screenshot per unique page.
+                      filename = f"site_page_{len(pages)}.jpg"
                       page.screenshot(
                           path=filename,
-                          full_page=True,
+                          type="jpeg",
+                          quality=72,
+                          full_page=False,
                           animations="disabled"
                       )
 
                       pages.append({
-                          "url": url,
+                          "index": len(pages),
+                          "url": final_url,
                           "title": title,
-                          "text": text
+                          "text": body[:4500],
+                          "screenshot": filename
                       })
-                      screenshots.append(filename)
-                      print("Inspected:", url)
 
-                  except Exception as error:
-                      print("Page inspection skipped:", str(error))
+                  except Exception as e:
+                      print("Skipped page:", url, str(e)[:300])
 
               browser.close()
 
           if not pages:
-              raise RuntimeError("No public website pages could be inspected.")
+              raise RuntimeError(
+                  "Khela.top-এর কোনো ব্যবহারযোগ্য Public Page পাওয়া যায়নি।"
+              )
+
+          print("Successfully inspected pages:", len(pages))
 
           website_context = json.dumps(
-              pages, ensure_ascii=False
-          )[:18000]
+              [
+                  {
+                      "index": x["index"],
+                      "url": x["url"],
+                      "title": x["title"],
+                      "visible_text": x["text"]
+                  }
+                  for x in pages
+              ],
+              ensure_ascii=False
+          )[:26000]
 
-          # 2. Ask Gemini to create tutorial content from inspected pages.
+          history_context = json.dumps(
+              [
+                  {
+                      "type": x.get("type"),
+                      "title": x.get("title"),
+                      "topic": x.get("topic")
+                  }
+                  for x in recent_history
+              ],
+              ensure_ascii=False
+          )
+
+          # --------------------------------------------------
+          # 3. Prepare a vision-enabled Gemini request.
+          #    Gemini receives both website text and screenshots.
+          # --------------------------------------------------
+
+          parts = []
+
           if mode == "carousel":
               instructions = """
-              তুমি Khela.top-এর বাংলা Tutorial Writer।
-              ওয়েবসাইট থেকে পাওয়া বাস্তব তথ্যের বাইরে কিছু লিখবে না।
-              একটি Carousel Tutorial তৈরি করো।
-              ৫টি ছোট ধাপের বাংলা slide_text এবং একটি caption দাও।
-              প্রতিটি slide_text সংক্ষিপ্ত হবে।
-              কেবল যাচাই করা ফিচার ব্যাখ্যা করবে।
-              কোনো অদেখা বাটন বা ধাপ কল্পনা করবে না।
-              """
-              schema = """
-              {
-                "title": "tutorial title",
-                "caption": "Facebook Bengali caption",
-                "slide_text": [
-                  "Slide 1 text",
-                  "Slide 2 text",
-                  "Slide 3 text",
-                  "Slide 4 text",
-                  "Slide 5 text"
-                ]
+          তুমি Khela.top-এর একজন অভিজ্ঞ বাংলা Tutorial Designer।
+
+          তোমার কাজ হলো ওয়েবসাইটের বাস্তব ব্যবহার শেখানোর জন্য
+          একটি বিস্তারিত ৫-স্লাইডের Facebook Carousel Tutorial তৈরি করা।
+
+          অত্যন্ত গুরুত্বপূর্ণ নিয়ম:
+
+          1. কেবল ওয়েবসাইটে দেখা ও যাচাই করা তথ্য ব্যবহার করবে।
+          2. প্রতিটি Screenshot মনোযোগ দিয়ে দেখবে।
+          3. একটি নির্দিষ্ট Feature বা Workflow নিয়ে Tutorial করবে।
+          4. পাঁচটি ধাপ যেন একই কাজের যৌক্তিক ধারাবাহিক ধাপ হয়।
+          5. প্রতিটি Slide-এর জন্য আলাদা page_index নির্বাচন করবে।
+          6. একই page_index একাধিকবার ব্যবহার করা যাবে না।
+          7. Screenshot-এ দেখা যায়নি এমন বাটন, মেনু, অপশন বা
+             কার্যক্রম কল্পনা করবে না।
+          8. কোনো ফর্ম জমা দেওয়া, অ্যাকাউন্ট তৈরি, রেজিস্ট্রেশন
+             সম্পন্ন করা বা তথ্য পরিবর্তনের দাবি করবে না।
+          9. প্রতিটি Slide-এর লেখা বিস্তারিত, সহজ ও প্রাঞ্জল বাংলা হবে।
+          10. শুধু "এখানে ক্লিক করুন" লিখবে না। কোথায়, কেন,
+              কীভাবে কাজটি করতে হবে তা বুঝিয়ে বলবে।
+          11. Screenshot-এর সঙ্গে নির্দেশনার মিল থাকতে হবে।
+          12. পাঁচটি আলাদা Screenshot দিয়ে একটি ভালো Tutorial
+              তৈরি করা সম্ভব না হলে publish=false দেবে।
+          13. আগের পোস্টের বিষয় বা শিরোনাম পুনরাবৃত্তি করবে না।
+
+          প্রতিটি Slide-এ থাকবে:
+          - heading: ছোট ও আকর্ষণীয় শিরোনাম
+          - action: এই ধাপে কী করতে হবে
+          - details: কেন এবং কীভাবে করতে হবে, বিস্তারিত ব্যাখ্যা
+          - screen_hint: Screenshot-এ কোন দৃশ্যমান অংশটি খুঁজতে হবে
+
+          Facebook caption-এ Tutorial-এর পরিচয়, উপকারিতা,
+          ধাপগুলোর সংক্ষিপ্ত বিবরণ এবং ওয়েবসাইটের ঠিকানা থাকবে।
+
+          যদি উপযুক্ত ৫টি আলাদা পেজ না পাও, publish=false দেবে।
+          """
+
+              schema = {
+                  "publish": True,
+                  "title": "বাংলা Tutorial-এর শিরোনাম",
+                  "topic": "Tutorial-এর বিষয়",
+                  "caption": "বিস্তারিত Facebook caption",
+                  "slides": [
+                      {
+                          "page_index": 0,
+                          "heading": "প্রথম ধাপ",
+                          "action": "কী করতে হবে",
+                          "details": "কীভাবে ও কেন করতে হবে তার ব্যাখ্যা",
+                          "screen_hint": "Screenshot-এ কী খুঁজবেন"
+                      },
+                      {
+                          "page_index": 1,
+                          "heading": "দ্বিতীয় ধাপ",
+                          "action": "কী করতে হবে",
+                          "details": "বিস্তারিত ব্যাখ্যা",
+                          "screen_hint": "Screenshot-এ কী খুঁজবেন"
+                      },
+                      {
+                          "page_index": 2,
+                          "heading": "তৃতীয় ধাপ",
+                          "action": "কী করতে হবে",
+                          "details": "বিস্তারিত ব্যাখ্যা",
+                          "screen_hint": "Screenshot-এ কী খুঁজবেন"
+                      },
+                      {
+                          "page_index": 3,
+                          "heading": "চতুর্থ ধাপ",
+                          "action": "কী করতে হবে",
+                          "details": "বিস্তারিত ব্যাখ্যা",
+                          "screen_hint": "Screenshot-এ কী খুঁজবেন"
+                      },
+                      {
+                          "page_index": 4,
+                          "heading": "শেষ ধাপ",
+                          "action": "কী করতে হবে",
+                          "details": "বিস্তারিত ব্যাখ্যা",
+                          "screen_hint": "Screenshot-এ কী খুঁজবেন"
+                      }
+                  ]
               }
-              """
+
           else:
               instructions = """
-              তুমি Khela.top-এর বাংলা Tutorial Writer।
-              ওয়েবসাইট থেকে পাওয়া তথ্যের ভিত্তিতে একটি বিস্তারিত
-              লিখিত বাংলা পোস্ট তৈরি করো।
-              আজকের পোস্টটি সকালের Carousel-এর পুনরাবৃত্তি হবে না।
-              ওয়েবসাইটে যাচাই করা যায়নি এমন কোনো ফিচার দাবি করবে না।
-              """
-              schema = """
-              {
-                "title": "post title",
-                "caption": "Complete Bengali written tutorial"
-              }
-              """
+          তুমি Khela.top-এর বাংলা Educational Content Writer।
 
-          prompt = f"""
+          ওয়েবসাইটের বাস্তব ফিচার যাচাই করে একটি বিস্তারিত
+          বাংলা Facebook Tutorial লিখবে।
+
+          পোস্টটি হবে স্বয়ংসম্পূর্ণ এবং শেখানোর উপযোগী।
+
+          লেখার কাঠামো:
+          1. আকর্ষণীয় শিরোনাম
+          2. বিষয়টির প্রয়োজনীয়তা
+          3. কারা ব্যবহার করতে পারবেন
+          4. শুরু করার নিয়ম
+          5. ধাপে ধাপে বিস্তারিত নির্দেশনা
+          6. গুরুত্বপূর্ণ সতর্কতা বা টিপস
+          7. সাধারণ ভুল এড়ানোর উপায়
+          8. সংক্ষিপ্ত উপসংহার
+          9. Khela.top ওয়েবসাইটের ঠিকানা
+
+          প্রতিটি ধাপ সহজ বাংলায় ব্যাখ্যা করবে।
+          শুধু বাটনের নাম লিখে থেমে যাবে না।
+          বাস্তবে যাচাই করা হয়নি এমন কোনো ফিচার দাবি করবে না।
+          আগের পোস্টের বিষয় বা শিরোনাম পুনরাবৃত্তি করবে না।
+          কমপক্ষে ৫০০ শব্দের একটি কার্যকর Tutorial তৈরি করবে।
+          """
+
+              schema = {
+                  "publish": True,
+                  "title": "বাংলা Tutorial-এর শিরোনাম",
+                  "topic": "Tutorial-এর বিষয়",
+                  "caption": "সম্পূর্ণ বিস্তারিত বাংলা Tutorial"
+              }
+
+          parts.append({
+              "text": f"""
           {instructions}
 
           আজকের তারিখ: {now.strftime("%Y-%m-%d")}
-          প্রকাশের ধরন: {mode}
+          পোস্টের ধরন: {mode}
 
-          Website: {SITE}
+          WEBSITE:
+          {SITE}
 
-          WEBSITE INSPECTION:
+          WEBSITE TEXT:
           {website_context}
 
-          উত্তর শুধু JSON হবে।
+          RECENT POST HISTORY:
+          {history_context}
+
+          উত্তর শুধুমাত্র JSON হবে।
           JSON structure:
-          {schema}
+          {json.dumps(schema, ensure_ascii=False)}
           """
+              })
+
+          if mode == "carousel":
+              # Send up to 8 real page screenshots to Gemini.
+              for item in pages[:8]:
+                  with open(item["screenshot"], "rb") as f:
+                      image_data = base64.b64encode(
+                          f.read()
+                      ).decode("ascii")
+
+                  parts.append({
+                      "text": (
+                          f"SCREENSHOT PAGE INDEX {item['index']}\n"
+                          f"URL: {item['url']}\n"
+                          f"PAGE TITLE: {item['title']}"
+                      )
+                  })
+
+                  parts.append({
+                      "inlineData": {
+                          "mimeType": "image/jpeg",
+                          "data": image_data
+                      }
+                  })
 
           endpoint = (
               "https://generativelanguage.googleapis.com/v1beta/"
-              "models/gemini-3.1-flash-lite:generateContent"
+              f"models/{GEMINI_MODEL}:generateContent"
           )
 
           response = requests.post(
               endpoint,
               params={"key": API_KEY},
               json={
-                  "contents": [{
-                      "parts": [{"text": prompt}]
-                  }],
+                  "contents": [{"parts": parts}],
                   "generationConfig": {
                       "responseMimeType": "application/json",
-                      "temperature": 0.7
+                      "temperature": 0.45
                   }
               },
-              timeout=120
+              timeout=180
           )
+
           response.raise_for_status()
 
           raw = response.json()["candidates"][0][
               "content"
           ]["parts"][0]["text"]
 
-          raw = re.sub(r"^```(?:json)?\s*|\s*```$", "",
-                       raw.strip())
+          raw = re.sub(
+              r"^```(?:json)?\s*|\s*```$",
+              "",
+              raw.strip()
+          )
+
           content = json.loads(raw)
 
-          caption = content["caption"].strip()
+          if content.get("publish") is not True:
+              raise RuntimeError(
+                  "যাচাই করা তথ্য দিয়ে মানসম্মত Tutorial তৈরি হয়নি। "
+                  "নিরাপত্তার জন্য পোস্ট প্রকাশ করা হয়নি।"
+              )
+
+          title = content.get("title", "").strip()
+          topic = content.get("topic", "").strip()
+          caption = content.get("caption", "").strip()
+
+          if not title or not topic or not caption:
+              raise ValueError("Tutorial title, topic বা caption অনুপস্থিত।")
+
+          # Stop exact or near-exact title repetitions.
+          def normalize(value):
+              return re.sub(r"\s+", "", value.lower())
+
+          for old in recent_history:
+              old_title = old.get("title", "")
+              if old_title and normalize(old_title) == normalize(title):
+                  raise RuntimeError(
+                      "একই শিরোনামের পোস্ট আগে প্রকাশিত হয়েছে। "
+                      "পুনরাবৃত্তি ঠেকাতে প্রকাশ বন্ধ করা হয়েছে।"
+                  )
+
           if SITE not in caption:
               caption += "\n\nওয়েবসাইট: " + SITE
 
-          # 3. Publish a written post in the evening.
+          # --------------------------------------------------
+          # 4. Bengali font and image card helpers.
+          # --------------------------------------------------
+
+          def get_bengali_font(size):
+              result = subprocess.check_output(
+                  ["fc-match", "-f", "%{file}", "Noto Sans Bengali"],
+                  text=True
+              ).strip()
+
+              if not result or not os.path.exists(result):
+                  raise RuntimeError("বাংলা Font পাওয়া যায়নি।")
+
+              return ImageFont.truetype(result, size)
+
+          def wrap_text(draw, text, font, max_width):
+              words = str(text).split()
+              lines = []
+              current = ""
+
+              for word in words:
+                  test = word if not current else current + " " + word
+                  if draw.textlength(test, font=font) <= max_width:
+                      current = test
+                  else:
+                      if current:
+                          lines.append(current)
+                      current = word
+
+              if current:
+                  lines.append(current)
+
+              return lines
+
+          def draw_paragraph(
+              draw, text, x, y, font, fill,
+              max_width, max_lines=5, line_gap=12
+          ):
+              lines = wrap_text(draw, text, font, max_width)
+              if len(lines) > max_lines:
+                  lines = lines[:max_lines]
+                  lines[-1] += "…"
+
+              for line in lines:
+                  draw.text((x, y), line, font=font, fill=fill)
+                  y += font.size + line_gap
+
+              return y
+
+          def create_slide(index, slide, page_info):
+              W, H = 1080, 1350
+              canvas = Image.new("RGB", (W, H), "#101b32")
+              draw = ImageDraw.Draw(canvas)
+
+              title_font = get_bengali_font(48)
+              action_font = get_bengali_font(38)
+              body_font = get_bengali_font(30)
+              small_font = get_bengali_font(25)
+
+              # Header.
+              draw.rounded_rectangle(
+                  (35, 30, 1045, 230),
+                  radius=28,
+                  fill="#18365a"
+              )
+
+              draw.text(
+                  (70, 55),
+                  f"Khela.top  |  STEP {index + 1}/5",
+                  font=small_font,
+                  fill="#55e0c0"
+              )
+
+              draw_paragraph(
+                  draw,
+                  slide["heading"],
+                  70, 105,
+                  title_font,
+                  "#ffffff",
+                  920,
+                  max_lines=2
+              )
+
+              # Actual website screenshot.
+              with Image.open(page_info["screenshot"]) as original:
+                  screenshot = original.convert("RGB")
+                  screenshot.thumbnail((1000, 650))
+
+                  sx = (W - screenshot.width) // 2
+                  sy = 260 + (650 - screenshot.height) // 2
+
+                  draw.rounded_rectangle(
+                      (35, 245, 1045, 925),
+                      radius=22,
+                      fill="#ffffff"
+                  )
+                  canvas.paste(screenshot, (sx, sy))
+
+              # Instructions panel.
+              draw.rounded_rectangle(
+                  (35, 950, 1045, 1315),
+                  radius=26,
+                  fill="#18365a"
+              )
+
+              y = 980
+              y = draw_paragraph(
+                  draw,
+                  slide["action"],
+                  70, y,
+                  action_font,
+                  "#55e0c0",
+                  930,
+                  max_lines=2
+              )
+
+              y += 10
+              y = draw_paragraph(
+                  draw,
+                  slide["details"],
+                  70, y,
+                  body_font,
+                  "#ffffff",
+                  930,
+                  max_lines=4,
+                  line_gap=10
+              )
+
+              y += 8
+              draw_paragraph(
+                  draw,
+                  "স্ক্রিনে খুঁজুন: " + slide["screen_hint"],
+                  70, y,
+                  small_font,
+                  "#ffd479",
+                  930,
+                  max_lines=2
+              )
+
+              output = io.BytesIO()
+              canvas.save(output, format="JPEG", quality=90)
+              output.seek(0)
+              return output
+
+          # --------------------------------------------------
+          # 5. Publish a written tutorial or 5-slide carousel.
+          # --------------------------------------------------
+
           if mode == "written":
+              if len(caption) < 1200:
+                  raise ValueError(
+                      "লিখিত Tutorial যথেষ্ট বিস্তারিত হয়নি।"
+                  )
+
               result = requests.post(
                   f"{GRAPH}/{PAGE_ID}/feed",
                   data={
                       "message": caption,
                       "access_token": TOKEN
                   },
-                  timeout=90
+                  timeout=120
               )
+
               result.raise_for_status()
               post_id = result.json().get("id")
 
-          # 4. Prepare screenshot-based carousel in the morning.
           else:
-              slide_texts = content.get("slide_text", [])
+              slides = content.get("slides", [])
 
-              if len(slide_texts) != 5:
+              if len(slides) != 5:
                   raise ValueError(
-                      "Gemini must return exactly five slide texts."
+                      "ঠিক ৫টি Tutorial Slide পাওয়া যায়নি।"
                   )
 
-              if len(screenshots) < 1:
-                  raise RuntimeError("No screenshots available.")
+              selected = []
+              used_indices = set()
+
+              for slide in slides:
+                  page_index = slide.get("page_index")
+
+                  if (
+                      not isinstance(page_index, int)
+                      or page_index < 0
+                      or page_index >= len(pages)
+                      or page_index >= 8
+                  ):
+                      raise ValueError("Slide-এর page_index ভুল।")
+
+                  if page_index in used_indices:
+                      raise ValueError(
+                          "একই Screenshot একাধিক Slide-এ ব্যবহার করা হয়েছে।"
+                      )
+
+                  used_indices.add(page_index)
+
+                  for field in (
+                      "heading", "action", "details", "screen_hint"
+                  ):
+                      if not str(slide.get(field, "")).strip():
+                          raise ValueError(
+                              f"Slide field অনুপস্থিত: {field}"
+                          )
+
+                  selected.append((slide, pages[page_index]))
 
               uploaded_ids = []
 
-              for index in range(5):
-                  source = screenshots[
-                      min(index, len(screenshots) - 1)
-                  ]
-
-                  with Image.open(source) as original:
-                      image = original.convert("RGB")
-                      image.thumbnail((1200, 1200))
-
-                      # Add a simple branded footer.
-                      canvas = Image.new(
-                          "RGB", (1200, 1200), "#10213a"
-                      )
-                      x = (1200 - image.width) // 2
-                      y = 40
-
-                      canvas.paste(image, (x, y))
-
-                      draw = ImageDraw.Draw(canvas)
-                      draw.rectangle(
-                          (0, 1080, 1200, 1200),
-                          fill="#10213a"
-                      )
-                      draw.text(
-                          (45, 1100),
-                          "Khela.top",
-                          fill="white"
-                      )
-                      draw.text(
-                          (45, 1145),
-                          f"Step {index + 1} of 5",
-                          fill="#55dfc2"
-                      )
-
-                      output = io.BytesIO()
-                      canvas.save(output, format="JPEG",
-                                  quality=88)
-                      output.seek(0)
+              for index, (slide, page_info) in enumerate(selected):
+                  image_file = create_slide(
+                      index, slide, page_info
+                  )
 
                   upload = requests.post(
                       f"{GRAPH}/{PAGE_ID}/photos",
@@ -296,58 +686,99 @@ jobs:
                       },
                       files={
                           "source": (
-                              f"tutorial_{index+1}.jpg",
-                              output,
+                              f"khelatop_tutorial_{index + 1}.jpg",
+                              image_file,
                               "image/jpeg"
                           )
                       },
-                      timeout=90
+                      timeout=120
                   )
-                  upload.raise_for_status()
 
+                  upload.raise_for_status()
                   photo_id = upload.json().get("id")
+
                   if not photo_id:
                       raise RuntimeError(
-                          "Facebook did not return photo ID."
+                          "Facebook photo ID ফেরত দেয়নি।"
                       )
 
                   uploaded_ids.append(photo_id)
+                  print("Uploaded slide:", index + 1)
 
               attached = {
-                  f"attached_media[{i}]": json.dumps({
-                      "media_fbid": photo_id
-                  })
+                  f"attached_media[{i}]": json.dumps(
+                      {"media_fbid": photo_id}
+                  )
                   for i, photo_id in enumerate(uploaded_ids)
-              }
-
-              publish_data = {
-                  "message": caption,
-                  "access_token": TOKEN,
-                  **attached
               }
 
               result = requests.post(
                   f"{GRAPH}/{PAGE_ID}/feed",
-                  data=publish_data,
-                  timeout=90
+                  data={
+                      "message": caption,
+                      "access_token": TOKEN,
+                      **attached
+                  },
+                  timeout=120
               )
+
               result.raise_for_status()
               post_id = result.json().get("id")
 
           if not post_id:
-              raise RuntimeError("Facebook returned no post ID.")
+              raise RuntimeError(
+                  "Facebook কোনো Post ID ফেরত দেয়নি।"
+              )
 
-          print("SUCCESS: Published", mode, post_id)
+          print("SUCCESS:", mode, post_id)
+
+          # --------------------------------------------------
+          # 6. Save history so future posts can avoid repetition.
+          # --------------------------------------------------
+
+          history.append({
+              "date": now.strftime("%Y-%m-%d %H:%M"),
+              "type": mode,
+              "title": title,
+              "topic": topic,
+              "post_id": post_id
+          })
+
+          history = history[-60:]
+
+          with open(
+              HISTORY_FILE, "w", encoding="utf-8"
+          ) as f:
+              json.dump(
+                  history, f,
+                  ensure_ascii=False,
+                  indent=2
+              )
 
           with open(
               os.environ["GITHUB_STEP_SUMMARY"],
               "a", encoding="utf-8"
           ) as summary:
               summary.write("# Khela.top Tutorial Agent\n\n")
-              summary.write("**Mode:** " + mode + "\n\n")
-              summary.write("**Post ID:** " + post_id + "\n\n")
+              summary.write(f"**Mode:** {mode}\n\n")
+              summary.write(f"**Title:** {title}\n\n")
+              summary.write(f"**Topic:** {topic}\n\n")
+              summary.write(f"**Post ID:** {post_id}\n\n")
+              summary.write(f"**Website pages inspected:** {len(pages)}\n\n")
               summary.write("**Caption:**\n\n" + caption + "\n")
+
           PY
 
           python agent.py
 
+      - name: Save post history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add post_history.json
+          if git diff --cached --quiet; then
+            echo "No post history changes."
+          else
+            git commit -m "Update Khela.top tutorial post history"
+            git push
+          fi
