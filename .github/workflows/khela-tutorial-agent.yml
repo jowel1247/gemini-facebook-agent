@@ -1,1 +1,353 @@
 
+name: Khela.top Tutorial AI Agent
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Bangladesh time: 8:00 AM
+    - cron: "0 2 * * *"
+    # Bangladesh time: 6:00 PM
+    - cron: "0 12 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: khelatop-tutorial-agent
+  cancel-in-progress: false
+
+jobs:
+  tutorial-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install libraries
+        run: |
+          pip install --disable-pip-version-check \
+            playwright pillow requests
+          playwright install --with-deps chromium
+
+      - name: Run Khela.top Tutorial Agent
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
+          FACEBOOK_PAGE_ACCESS_TOKEN: ${{ secrets.FACEBOOK_PAGE_ACCESS_TOKEN }}
+          GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          cat > agent.py <<'PY'
+          import os, json, requests, io, re
+          from datetime import datetime, timezone, timedelta
+          from urllib.parse import urljoin, urlparse
+          from playwright.sync_api import sync_playwright
+          from PIL import Image, ImageDraw, ImageFont
+
+          SITE = "https://khela.top"
+          GRAPH = "https://graph.facebook.com/v27.0"
+          API_KEY = os.environ["GEMINI_API_KEY"]
+          PAGE_ID = os.environ["FACEBOOK_PAGE_ID"]
+          TOKEN = os.environ["FACEBOOK_PAGE_ACCESS_TOKEN"]
+
+          now = datetime.now(timezone.utc) + timedelta(hours=6)
+          schedule = os.environ.get("EVENT_SCHEDULE", "")
+
+          if schedule == "0 2 * * *":
+              mode = "carousel"
+          elif schedule == "0 12 * * *":
+              mode = "written"
+          else:
+              mode = "carousel" if now.hour < 13 else "written"
+
+          print("Bangladesh time:", now.isoformat())
+          print("Selected mode:", mode)
+
+          # 1. Browse publicly accessible website pages.
+          pages = []
+          screenshots = []
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+              page = browser.new_page(
+                  viewport={"width": 1365, "height": 900},
+                  device_scale_factor=1
+              )
+
+              page.goto(SITE, wait_until="domcontentloaded",
+                        timeout=60000)
+              page.wait_for_timeout(3000)
+
+              links = page.locator("a[href]").evaluate_all(
+                  """els => els.map(a => a.href)"""
+              )
+
+              urls = [SITE]
+              for link in links:
+                  parsed = urlparse(link)
+                  if parsed.netloc == urlparse(SITE).netloc:
+                      clean = link.split("#")[0]
+                      if clean not in urls:
+                          urls.append(clean)
+                  if len(urls) >= 7:
+                      break
+
+              for index, url in enumerate(urls[:6]):
+                  try:
+                      page.goto(url, wait_until="domcontentloaded",
+                                timeout=30000)
+                      page.wait_for_timeout(1500)
+
+                      title = page.title()
+                      text = page.locator("body").inner_text(
+                          timeout=10000
+                      )[:5000]
+
+                      filename = f"page_{index}.png"
+                      page.screenshot(
+                          path=filename,
+                          full_page=True,
+                          animations="disabled"
+                      )
+
+                      pages.append({
+                          "url": url,
+                          "title": title,
+                          "text": text
+                      })
+                      screenshots.append(filename)
+                      print("Inspected:", url)
+
+                  except Exception as error:
+                      print("Page inspection skipped:", str(error))
+
+              browser.close()
+
+          if not pages:
+              raise RuntimeError("No public website pages could be inspected.")
+
+          website_context = json.dumps(
+              pages, ensure_ascii=False
+          )[:18000]
+
+          # 2. Ask Gemini to create tutorial content from inspected pages.
+          if mode == "carousel":
+              instructions = """
+              তুমি Khela.top-এর বাংলা Tutorial Writer।
+              ওয়েবসাইট থেকে পাওয়া বাস্তব তথ্যের বাইরে কিছু লিখবে না।
+              একটি Carousel Tutorial তৈরি করো।
+              ৫টি ছোট ধাপের বাংলা slide_text এবং একটি caption দাও।
+              প্রতিটি slide_text সংক্ষিপ্ত হবে।
+              কেবল যাচাই করা ফিচার ব্যাখ্যা করবে।
+              কোনো অদেখা বাটন বা ধাপ কল্পনা করবে না।
+              """
+              schema = """
+              {
+                "title": "tutorial title",
+                "caption": "Facebook Bengali caption",
+                "slide_text": [
+                  "Slide 1 text",
+                  "Slide 2 text",
+                  "Slide 3 text",
+                  "Slide 4 text",
+                  "Slide 5 text"
+                ]
+              }
+              """
+          else:
+              instructions = """
+              তুমি Khela.top-এর বাংলা Tutorial Writer।
+              ওয়েবসাইট থেকে পাওয়া তথ্যের ভিত্তিতে একটি বিস্তারিত
+              লিখিত বাংলা পোস্ট তৈরি করো।
+              আজকের পোস্টটি সকালের Carousel-এর পুনরাবৃত্তি হবে না।
+              ওয়েবসাইটে যাচাই করা যায়নি এমন কোনো ফিচার দাবি করবে না।
+              """
+              schema = """
+              {
+                "title": "post title",
+                "caption": "Complete Bengali written tutorial"
+              }
+              """
+
+          prompt = f"""
+          {instructions}
+
+          আজকের তারিখ: {now.strftime("%Y-%m-%d")}
+          প্রকাশের ধরন: {mode}
+
+          Website: {SITE}
+
+          WEBSITE INSPECTION:
+          {website_context}
+
+          উত্তর শুধু JSON হবে।
+          JSON structure:
+          {schema}
+          """
+
+          endpoint = (
+              "https://generativelanguage.googleapis.com/v1beta/"
+              "models/gemini-3.1-flash-lite:generateContent"
+          )
+
+          response = requests.post(
+              endpoint,
+              params={"key": API_KEY},
+              json={
+                  "contents": [{
+                      "parts": [{"text": prompt}]
+                  }],
+                  "generationConfig": {
+                      "responseMimeType": "application/json",
+                      "temperature": 0.7
+                  }
+              },
+              timeout=120
+          )
+          response.raise_for_status()
+
+          raw = response.json()["candidates"][0][
+              "content"
+          ]["parts"][0]["text"]
+
+          raw = re.sub(r"^```(?:json)?\s*|\s*```$", "",
+                       raw.strip())
+          content = json.loads(raw)
+
+          caption = content["caption"].strip()
+          if SITE not in caption:
+              caption += "\n\nওয়েবসাইট: " + SITE
+
+          # 3. Publish a written post in the evening.
+          if mode == "written":
+              result = requests.post(
+                  f"{GRAPH}/{PAGE_ID}/feed",
+                  data={
+                      "message": caption,
+                      "access_token": TOKEN
+                  },
+                  timeout=90
+              )
+              result.raise_for_status()
+              post_id = result.json().get("id")
+
+          # 4. Prepare screenshot-based carousel in the morning.
+          else:
+              slide_texts = content.get("slide_text", [])
+
+              if len(slide_texts) != 5:
+                  raise ValueError(
+                      "Gemini must return exactly five slide texts."
+                  )
+
+              if len(screenshots) < 1:
+                  raise RuntimeError("No screenshots available.")
+
+              uploaded_ids = []
+
+              for index in range(5):
+                  source = screenshots[
+                      min(index, len(screenshots) - 1)
+                  ]
+
+                  with Image.open(source) as original:
+                      image = original.convert("RGB")
+                      image.thumbnail((1200, 1200))
+
+                      # Add a simple branded footer.
+                      canvas = Image.new(
+                          "RGB", (1200, 1200), "#10213a"
+                      )
+                      x = (1200 - image.width) // 2
+                      y = 40
+
+                      canvas.paste(image, (x, y))
+
+                      draw = ImageDraw.Draw(canvas)
+                      draw.rectangle(
+                          (0, 1080, 1200, 1200),
+                          fill="#10213a"
+                      )
+                      draw.text(
+                          (45, 1100),
+                          "Khela.top",
+                          fill="white"
+                      )
+                      draw.text(
+                          (45, 1145),
+                          f"Step {index + 1} of 5",
+                          fill="#55dfc2"
+                      )
+
+                      output = io.BytesIO()
+                      canvas.save(output, format="JPEG",
+                                  quality=88)
+                      output.seek(0)
+
+                  upload = requests.post(
+                      f"{GRAPH}/{PAGE_ID}/photos",
+                      data={
+                          "published": "false",
+                          "access_token": TOKEN
+                      },
+                      files={
+                          "source": (
+                              f"tutorial_{index+1}.jpg",
+                              output,
+                              "image/jpeg"
+                          )
+                      },
+                      timeout=90
+                  )
+                  upload.raise_for_status()
+
+                  photo_id = upload.json().get("id")
+                  if not photo_id:
+                      raise RuntimeError(
+                          "Facebook did not return photo ID."
+                      )
+
+                  uploaded_ids.append(photo_id)
+
+              attached = {
+                  f"attached_media[{i}]": json.dumps({
+                      "media_fbid": photo_id
+                  })
+                  for i, photo_id in enumerate(uploaded_ids)
+              }
+
+              publish_data = {
+                  "message": caption,
+                  "access_token": TOKEN,
+                  **attached
+              }
+
+              result = requests.post(
+                  f"{GRAPH}/{PAGE_ID}/feed",
+                  data=publish_data,
+                  timeout=90
+              )
+              result.raise_for_status()
+              post_id = result.json().get("id")
+
+          if not post_id:
+              raise RuntimeError("Facebook returned no post ID.")
+
+          print("SUCCESS: Published", mode, post_id)
+
+          with open(
+              os.environ["GITHUB_STEP_SUMMARY"],
+              "a", encoding="utf-8"
+          ) as summary:
+              summary.write("# Khela.top Tutorial Agent\n\n")
+              summary.write("**Mode:** " + mode + "\n\n")
+              summary.write("**Post ID:** " + post_id + "\n\n")
+              summary.write("**Caption:**\n\n" + caption + "\n")
+          PY
+
+          python agent.py
+
